@@ -1,0 +1,703 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+## Summary of Our Process
+
+
+The goal of this project is to predict box office revenue with a random forest model. We chose to use random forest model because of it's ability to handle categorical variables. In addition, given our large dataset, the computational power required for neural networks would be highly intensive as well as the k-fold testing. Therefore, given random forests capabilities and computational power, we decided to just focus on finding the best way to handle the data to produce the best error rate from random forest models. Our objective will be to achieve the best possible RMSE using random forest models.
+
+In this notebook we will focus on refining the data set itself by handling the data in different ways such as:  
+
+1. Predicting with "raw" data
+2. Predicting with intensively cleaned data with more features & binary features
+3. Predicting with imputed data
+4. Using ANOVA to test some features after finding in steps 1-3 there is an impact from feature selection
+
+*Package Reading*
+
+```{r}
+library(readr)
+library(stringr)
+library(tidyverse)
+library(dplyr)
+library(plyr)
+library(tidyr)
+library(ggplot2)
+library(sjmisc)
+library(highcharter)
+library(zoo)
+library(randomForest)
+
+```
+
+
+## Iteration A - Model on Minimal Data Cleaning
+
+For our first iteration we used the direct data from Kaggle with the revenue figures & rotten tomato metrics we scraped. The goal here is to see how good of a model we could build without having to do much data cleaning.
+
+*Data Preparation*
+
+```{r}
+moviesdata <- read.csv("allMerge.csv")
+data <- moviesdata
+glimpse(data)
+
+```
+
+
+We did a quick clean of the data to make it readable. We're dropping all the columns that aren't model friendly and fixing the data type of the columns. We are storing the cleaned data as simpleData_ so we can alter the data different ways for different models without having to re-clean the data.
+
+```{r}
+
+data <- moviesdata
+
+#Rather than do complex cleaning we drop unreadable columns
+data <- subset(data, select = -c(X, adult, belongs_to_collection, genres, homepage, id, imdb_id, original_language, original_title, overview, poster_path, production_companies, production_countries, spoken_languages, tagline, title, orginal_title_2, year_2, cast,crew, revenue))
+#note we're dropping revenue as it was mainly zeros and we scraped tvalues in a new column
+
+#Fix the data types
+data <- drop_na(data)
+data$budget <-  as.numeric(as.character(data$budget))
+data$popularity <- as.numeric(as.character(data$popularity))
+data$release_date <- as.Date(data$release_date)
+data$Total.Revenue <- as.numeric(gsub("[\\$,]", "", data$Total.Revenue))
+
+#identify NAs
+data$meterClass[data$meterScore < 0] <- NA
+data$meterScore[data$meterScore < 0] <- NA
+data$Total.Revenue[data$Total.Revenue == 0] <- NA
+simpleData_ <- data
+dim(data)
+```
+
+Since this is the most complete dataset, we'll also store the average revenue to compare models going forward. For simplicty we'll just do this once and use it in all the error analysis. Since we are only taken the revenue value this will be the same among all datasets and should be sufficient.
+
+```{r}
+actual_rev_average = mean(simpleData_[!is.na(simpleData_$Total.Revenue) ,]$Total.Revenue)
+```
+
+
+**View Summary and NAs**
+
+We found that the budget had a 1st quartile of 0 meaning that at least 25% of the movies had a $0 budget. This seemed highly unrealistic that so many movies would make a movie for 0 dollars. We also saw that the meter metrics from rotten tomato -- meterClass and meterScore -- had a substantial about of NAs. This stood out to us as we intended to drop NAs and this would cause us to lose a lot of our data points. 
+
+In trying different forms of our model these three features -- budget, meterClass and meterScore -- would be significant to play around with. Through different iterations we also need to figure out how to treat a 0 dollar budget as NA or just leave it as 0.
+
+```{r}
+array_nas = sapply(data, function(x) sum(is.na(x)))
+na_df  = as.data.frame(array_nas) #converting to dataframe 
+na_df$Title = row.names(na_df) #creating title column 
+
+#making histogram of results 
+hist_nas  <- na_df%>% arrange(array_nas)%>%
+  hchart(
+  'column', hcaes(x = Title, y = array_nas, color = Title)
+  )
+
+hist_nas
+data <- drop_na(data)
+summary(data)
+
+```
+
+
+We also plotted the data points just to get a high level understanding on the correlation between our features of concern and our predicted value Total.Revenue. This gives us insight into the possible relevancy of our data.
+
+```{r}
+ggplot(data = data) +  geom_point(mapping = aes(x = budget, y = Total.Revenue))
+ggplot(data = data) +  geom_point(mapping = aes(x = popularity, y = Total.Revenue))
+ggplot(data = data) +  geom_point(mapping = aes(x = release_date, y = Total.Revenue))
+ggplot(data = data) +  geom_point(mapping = aes(x = runtime, y = Total.Revenue))
+ggplot(data = data) +  geom_point(mapping = aes(x = vote_average, y = Total.Revenue))
+ggplot(data = data) + geom_point(mapping = aes(x = vote_count, y = Total.Revenue))
+ggplot(data = data) + geom_point(mapping = aes(x = meterScore, y = Total.Revenue))
+
+```
+
+Find the right ntree to use
+```{r}
+data <- simpleData_
+data$budget[data$budget == 0] <- NA
+data <- drop_na(data)
+
+num_samples = dim(data)[1]
+sampling.rate = 0.8
+training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+trainingSet <- subset(data[training, ])
+testing <- setdiff(1:num_samples,training)
+testingSet <- subset(data[testing, ])
+
+randomForestModel <- randomForest(Total.Revenue ~ ., data=trainingSet)
+plot(randomForestModel)
+
+```
+
+*Note: Because we will be running several different models -- we will use the ntree identified in this plot for all our models going forward rather than pruning each time. We recognize that each model may require it's own tuning but for efficiency and the purposes of this assignment we beleive using the identified ntree = 200 will be sufficient for all*
+
+**Running 5 Different Models on Simple Data**
+
+Now we run the model on the raw data treating our columns with missing values (meterScore & meterClass)  & high 0 columns (budget) in different ways.
+
+  
+*Model 1:Treating 0 dollar budget as NA*
+```{r}
+
+#with budget = NA
+data <- simpleData_
+data$budget[data$budget == 0] <- NA
+data <- drop_na(data)
+dim(data)
+
+err1 = c()
+rms1 = c()
+
+for(i in 1:3){
+  num_samples = dim(data)[1]
+  sampling.rate = 0.8
+  training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+  trainingSet <- subset(data[training, ])
+  testing <- setdiff(1:num_samples,training)
+  testingSet <- subset(data[testing, ])
+  randomForestModel <- randomForest(Total.Revenue ~ ., data=trainingSet, ntree=200)
+  
+  predictions <- predict(randomForestModel, testingSet)
+  error = predictions - testingSet$Total.Revenue
+  mse = mean(error^2)
+  rmse = sqrt(mse)
+  rms1[i] = rmse
+}
+
+```
+
+
+```{r}
+mean(rms1)
+mean(rms1)/actual_rev_average
+```
+
+  
+  
+*Model 2:Treating 0 dollar budget as NA & removing the meter columns*
+```{r}
+#with budget = NA & meterClass not included
+data <- simpleData_
+data$budget[data$budget == 0] <- NA
+data <- subset(data, select = -c(meterScore, meterClass))
+data <- drop_na(data)
+
+err2 = c()
+rms2 = c()
+for(i in 1:3){
+  num_samples = dim(data)[1]
+  sampling.rate = 0.8
+  training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+  trainingSet <- subset(data[training, ])
+  testing <- setdiff(1:num_samples,training)
+  testingSet <- subset(data[testing, ])
+  randomForestModel <- randomForest(Total.Revenue ~ ., data=trainingSet, ntree=200)
+  
+  predictions <- predict(randomForestModel, testingSet)
+  error = predictions - testingSet$Total.Revenue
+  mse = mean(error^2)
+  rmse = sqrt(mse)
+  rms2[i] = rmse
+}
+
+
+```
+
+```{r}
+mean(rms2)
+mean(rms2)/actual_rev_average
+```
+  
+*Model 3: Leave as is*  
+```{r}
+data <- simpleData_
+data <- drop_na(data)
+
+
+rms3 = c()
+for(i in 1:3){
+  num_samples = dim(data)[1]
+  sampling.rate = 0.8
+  training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+  trainingSet <- subset(data[training, ])
+  testing <- setdiff(1:num_samples,training)
+  testingSet <- subset(data[testing, ])
+  randomForestModel <- randomForest(Total.Revenue ~ ., data=trainingSet, ntree=200)
+  
+  predictions <- predict(randomForestModel, testingSet)
+  error = predictions - testingSet$Total.Revenue
+  mse = mean(error^2)
+  rmse = sqrt(mse)
+  rms3[i] = rmse
+}
+```
+
+```{r}
+mean(rms3)
+mean(rms3)/actual_rev_average
+
+```  
+  
+*Model 4:Treating 0 dollar budget as is & removing the meter columns*  
+```{r}
+data <- simpleData_
+data <- subset(data, select = -c(meterScore, meterClass))
+data <- drop_na(data)
+
+
+rms4 = c()
+for(i in 1:3){
+  num_samples = dim(data)[1]
+  sampling.rate = 0.8
+  training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+  trainingSet <- subset(data[training, ])
+  testing <- setdiff(1:num_samples,training)
+  testingSet <- subset(data[testing, ])
+  randomForestModel <- randomForest(Total.Revenue ~ ., data=trainingSet, ntree=200)
+  
+  predictions <- predict(randomForestModel, testingSet)
+  error = predictions - testingSet$Total.Revenue
+  mse = mean(error^2)
+  rmse = sqrt(mse)
+  rms4[i] = rmse
+}
+
+```
+
+```{r}
+mean(rms4)
+mean(rms4)/actual_rev_average
+
+```
+  
+*Model 5:removing the meter & budget columns*  
+```{r}
+data <- simpleData_
+data <- subset(data, select = -c(meterScore, meterClass, budget))
+data <- drop_na(data)
+
+rms5 = c()
+for(i in 1:3){
+  num_samples = dim(data)[1]
+  sampling.rate = 0.8
+  training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+  trainingSet <- subset(data[training, ])
+  testing <- setdiff(1:num_samples,training)
+  testingSet <- subset(data[testing, ])
+  randomForestModel <- randomForest(Total.Revenue ~ ., data=trainingSet, ntree=200)
+  
+  predictions <- predict(randomForestModel, testingSet)
+  error = predictions - testingSet$Total.Revenue
+  mse = mean(error^2)
+  rmse = sqrt(mse)
+  rms5[i] = rmse
+}
+
+
+```
+
+```{r}
+mean(rms5)
+mean(rms5)/actual_rev_average
+
+```
+
+
+**Error Analysis**  
+  
+Examining the results we found that the model with the best performance was when we treated 0s in the budget as is and removed the meterScore and meterClass column. 
+
+A possible hypothesis on why significant variations in the RMSE could be occurring between the models is that the meter columns overfit the data or are insignificant. By removing these columns the model could possibly be now relying on other features which were stronger predictors of revenue prediction. When we also removed the budget column the error got slightly worse. This indicates that budget is likely a relevant feature. 
+
+If you also examine the lists of RMSE of the 3rd and 4th model you'll noticed there's a difference in how much the error varies. This also indicates that model 3 is less reliable and the smaller RMSE in variation of model 4 also alludes to it being a stronger model. We also recognize that we've only ran an average on 3 where as to truly validate this hypthesis a higher number of iterations of 5 or more would be more sufficient.
+
+```{r}
+
+rms3
+rms4
+
+```
+
+We also noticed that these RMSE are extremely large with rmse as % of average > 1. Given the fact that it is not possible for Total Revenue to be negative this could indicate that our model is more inclined to overestimate revenue. 
+
+Since we saw that keeping 0 budget as is and removing the meterClass columns was the second most effective, going forward we will limit future models to these 2 modifications. Later on we will revisit how to choose which features in addition to or instead of the meterColumns to remove.
+
+
+## Iteration B - Model on Expanded Data Set with Binary Values
+
+Now we'll run some models using the extensively cleaned data which has binary values and additional features extracted from columns with lists.
+
+*Note*: that sometimes we will do 0.5 vs 0.8. This is because we recognize that the data set size varies when we remove certain columns with high NAs so to keep the data size relative consistent we use the relevant sample size.
+
+Also -- for more computationally intensive data sets we use a for loop of 3-fold instead of 5-fold.
+
+**Read in the cleaned data**
+
+```{r}
+
+expandedData <- read.csv("allMergeNA.csv")
+
+```
+
+
+```{r}
+data <- expandedData
+data <- subset(data, select = -c(X, homepage, id, imdb_id, title, year_2, production_countries, production_companies, tagline, spoken_languages, genres, cast, crew, belongs_to_collection, poster_path, adult, overview, orginal_title_2, original_title, original_language, budget, prod_comp_name, revenue))
+dim(data)
+
+
+#Fix necessary data types
+data$release_date <- as.Date(data$release_date)
+data <- mutate_if(data, is.logical, as.factor)
+expandedData_ <- data
+
+```
+
+**Ploting some of our binary values to see if there's any indication of a relationship to revenue**
+```{r}
+data <- drop_na(data)
+#revenues
+all_genres <- c("comedy", "horror", "action", "drama", "documentary", "science_fiction",
+              "crime", "fantasy", "thriller", "animation", "adventure", "mystery", "war", "romance", "music",
+              "family","western","history","tv_movie","foreign")
+all_prodcomps = c("paramount", "mgm", "twentieth_century", "warner_bros", "universal", "columbia", "rko_radio", "united_artists", "walt_disney", "new_line_cinema")
+
+##country
+#finding mean total revenue based on production_country 
+prod_country_mean = tapply(data$Total.Revenue, data$production_country, mean)
+prod_country_mean = as.data.frame.table(prod_country_mean) #converting to dataframe 
+
+#making histogram of results 
+prod_country_chart  <- prod_country_mean %>% 
+  hchart(
+  'column', hcaes(x = Var1, y = Freq, color = Var1)
+  ) %>% hc_title(text = "Average Revenue per Country")
+
+prod_country_chart <- prod_country_chart %>%
+  hc_xAxis(title = list(text = "Country")) %>%
+  hc_yAxis(title = list(text = "Average Revenue"))
+
+prod_country_chart
+
+###company
+list_prod_rev <- c()
+for(i in all_prodcomps){
+  new <- c(mean(data$Total.Revenue[data[, i] == TRUE]))
+  list_prod_rev <- c(list_prod_rev, new)
+}
+prod_df = data.frame(all_prodcomps, list_prod_rev)
+prod_hist  <- prod_df %>% arrange(list_prod_rev)%>%
+  hchart(
+  'column', hcaes(x = all_prodcomps, y = list_prod_rev, color = all_prodcomps)
+  )
+prod_hist
+
+###genre
+list_genre_rev = c()
+for(i in all_genres){
+  new <- c(mean(data$Total.Revenue[data[,i]== TRUE]))
+  list_genre_rev <- c(list_genre_rev, new)
+}
+genre_df = data.frame(all_genres, list_genre_rev)
+genre_hist  <- genre_df %>% arrange(list_genre_rev)%>%
+  hchart(
+  'column', hcaes(x = all_genres, y = list_genre_rev, color = all_genres)
+  )
+genre_hist
+
+```
+
+
+*Model 1: Budget is as & no meter class or meter score*
+```{r}
+
+data <- expandedData_
+data <- subset(data, select = -c(meterScore, meterClass))
+data <- drop_na(data)
+rmsb1 = c()
+
+for(i in 1:5){
+  num_samples = dim(data)[1]
+  sampling.rate = 0.5
+  training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+  trainingSet <- subset(data[training, ])
+  testing <- setdiff(1:num_samples,training)
+  testingSet <- subset(data[testing, ])
+  randomForestModel <- randomForest(Total.Revenue ~ ., data=trainingSet, ntree=200)
+  
+  predictions <- predict(randomForestModel, testingSet)
+  error = predictions - testingSet$Total.Revenue
+  mse = mean(error^2)
+  rmse = sqrt(mse)
+  rmsb1[i] = rmse
+}
+
+
+```
+
+
+
+*Model 2: budget as is & leave in meter columns*
+```{r}
+data <- expandedData_
+data <- drop_na(data)
+
+
+rmsb2 = c()
+for(i in 1:5){
+  num_samples = dim(data)[1]
+  #using 0.8 here cause it has less data 
+  sampling.rate = 0.5
+  training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+  trainingSet <- subset(data[training, ])
+  testing <- setdiff(1:num_samples,training)
+  testingSet <- subset(data[testing, ])
+  randomForestModel <- randomForest(Total.Revenue ~ ., data=trainingSet, ntree=200)
+  
+  predictions <- predict(randomForestModel, testingSet)
+  error = predictions - testingSet$Total.Revenue
+  mse = mean(error^2)
+  rmse = sqrt(mse)
+  rmsb2[i] = rmse
+}
+
+
+```
+
+
+**Error Analysis**
+```{r}
+mean(rmsb1)
+mean(rmsb1)/actual_rev_average
+
+mean(rmsb2)
+mean(rmsb2)/actual_rev_average
+```
+
+The RMSE for iteration A was better than that of iteration B under similar conditions. It is not enough to simply add features to try and improve the model. Overall in  both cases we found that the model performs better once again without the meter columns.
+
+## Iteration C: Imputed Data Model on  Expanded Data Set with Binary Values
+
+```{r}
+
+imputed_data <- read.csv("rf_imputations.csv")
+
+```
+
+load data
+```{r}
+data <- imputed_data
+data <- subset(data, select = -c(X, title, original_language, prod_comp_name))
+data$release_date <- as.Date(data$release_date)
+data <- mutate_if(data, is.logical, as.factor)
+data <- drop_na(data)
+dim(data)
+imputed_data_ <- data
+
+```
+
+
+*Run model as is*
+```{r}
+
+data <- imputed_data_
+rmsc1 = c()
+
+for(i in 1:5){
+  num_samples = dim(data)[1]
+  sampling.rate = 0.5
+  training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+  trainingSet <- subset(data[training, ])
+  testing <- setdiff(1:num_samples,training)
+  testingSet <- subset(data[testing, ])
+  randomForestModel <- randomForest(Total.Revenue ~ ., data=trainingSet, ntree=200)
+  
+  predictions <- predict(randomForestModel, testingSet)
+  error = predictions - testingSet$Total.Revenue
+  mse = mean(error^2)
+  rmse = sqrt(mse)
+  rmsc1[i] = rmse
+}
+
+```
+
+
+*no meter stuff*
+
+```{r}
+data <- imputed_data_
+data <- subset(data, select = -c(meterScore, meterClass))
+
+
+rmsc2 = c()
+for(i in 1:3){
+  num_samples = dim(data)[1]
+  sampling.rate = 0.5
+  training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+  trainingSet <- subset(data[training, ])
+  testing <- setdiff(1:num_samples,training)
+  testingSet <- subset(data[testing, ])
+  randomForestModel <- randomForest(Total.Revenue ~ ., data=trainingSet, ntree=200)
+  
+  predictions <- predict(randomForestModel, testingSet)
+  error = predictions - testingSet$Total.Revenue
+  mse = mean(error^2)
+  rmse = sqrt(mse)
+  rmsc2[i] = rmse
+}
+
+```
+
+**Error Numbers**
+```{r}
+mean(rmsc1)
+mean(rmsc1)/actual_rev_average
+
+mean(rmsc2)
+mean(rmsc2)/actual_rev_average
+```
+
+
+**Error Analysis**  
+
+The error rate on the imputed model produces gives better results than the error rates in the previous iteration. Noticeably, for this iteration, the difference in the error rate is minimal between when we keep the meter columns versus when we drop them. One reason could be the imputed data has a more complete data set and is therefore more informed in detecting relevant patterns.
+
+A reason why the expanded data set worked better with imputations and not on it's own could be that missing values could indicate smaller movies which don't have easily accessible information. So by dropping missing values in iteration B we are informed on higher values which overestimates. However, by using imputed values we have more of a complete data set.**
+
+### Comparison of Models & Overall Analysis
+
+Overall we found that the model performed best on iteration C (imputed data w/ expanded data) and iteration A (the raw data minimally clean) with iteration B being the worst performing (just expaned data). We conclude that the data performed best with imputed data filling in the missing values.
+
+We also noticed playing around with the columns we used changed the error rate. So the next step is exploring more into feature manipulation.
+
+
+## Feature Selection Intro
+
+We are going to dig deeper now on feature selection. Since we found that the imputed data worked the best we will use this going forward. We also noticed that the raw data had pretty good error rates when we dropped some columns so we'll revisit this data set as well.
+
+*Normal distribution check*
+First we'll try with ANOVA. Anova requires normal distribution so we need to check it's normality. Two ways is by the Q-Q plot or the Shapiro Wilk Test.
+
+```{r}
+shapiro.test(drop_na(simpleData_)[1:5000,"Total.Revenue"])
+qqnorm(drop_na(simpleData_)[,"Total.Revenue"])
+qqline(drop_na(simpleData_)[,"Total.Revenue"], col="red")
+```
+The Q-Q plot should have the dots along the line of fit to indicate normality. It does not, therefore the data is not normaly ditributed. The wilks test should have p > 0.05. It does not. This confirms the data is not normally distributed.
+
+For learning purposes and comparison against recursive selection we will proceed and see the effect of running ANOVA.
+
+**First we will tests on the imputed data**
+
+
+```{r}
+anova_df <- drop_na(subset(imputed_data_, select=-c(adult)) )#drop columns that only have one level
+one.way <- aov(Total.Revenue ~ ., data =anova_df)
+summary(one.way)
+```
+
+
+From the anova summary we see that  meterClass is not  statistically significant. Hence why it may have been negitavley affecting our model previously. However it does not select meterScore as insignificant and these two metrics are highly correlated. Removing all the columns with significance codes of ** or less (P value less than or equal to 0.001) we will re-run our model and see if we can achieve a better error rate.
+
+
+Rerun dropping columns indicated as insignificant from anova 
+```{r}
+data <- imputed_data_
+rmsd1 = c()
+maped1 = c()
+
+for(i in 1:3){
+  num_samples = dim(data)[1]
+  sampling.rate = 0.5
+  training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+  trainingSet <- subset(data[training, ])
+  testing <- setdiff(1:num_samples,training)
+  testingSet <- subset(data[testing, ])
+  randomForestModel <- randomForest(Total.Revenue ~ . - runtime - num_spoken_languages - number_of_cast - male_cast - unspecified_cast - male_crew - meterClass - unspecified_crew - documentary - release_date - meterClass - mystery - war - music - history - tv_movie - foreign - mgm - columbia - rko_radio - united_artists - new_line_cinema - prod_size, data=trainingSet, ntree=200)
+  
+  predictions <- predict(randomForestModel, testingSet)
+  error = predictions - testingSet$Total.Revenue
+  mse = mean(error^2)
+  rmse = sqrt(mse)
+  rmsd1[i] = rmse
+  maped1[i] =  mean(abs(error/testingSet$Total.Revenue))
+}
+
+
+```
+
+```{r}
+mean(rmsd1)
+mean(rmsd1)/actual_rev_average
+
+```
+
+**imputed anova analysis** 
+There is not much improvement on the imputed data using ANOVA.
+
+Running anova tests on the simple data
+```{r}
+anova_df <- drop_na(subset(simpleData_, select = -c(status, video)) )#drop columns that only have one level
+one.way <- aov(Total.Revenue ~ ., data =anova_df)
+summary(one.way)
+```
+
+
+**Now we will tests on the raw data**
+
+remove statistacally insignificant columns
+```{r}
+data <- subset(simpleData_, select = -c(meterClass))
+data <- drop_na(data)
+rmsd2 = c()
+mape_d2 = c()
+
+for(i in 1:3){
+  num_samples = dim(data)[1]
+  sampling.rate = 0.5
+  training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+  trainingSet <- subset(data[training, ])
+  testing <- setdiff(1:num_samples,training)
+  testingSet <- subset(data[testing, ])
+  randomForestModel <- randomForest(Total.Revenue ~ ., data=trainingSet, ntree=200)
+  
+  predictions <- predict(randomForestModel, testingSet)
+  error = predictions - testingSet$Total.Revenue
+  mse = mean(error^2)
+  rmsd2[i] = sqrt(mse)
+  mape_d2[i] =  mean(abs(error/testingSet$Total.Revenue))
+}
+```
+
+
+```{r}
+mean(rmsd2)
+mean(rmsd2)/actual_rev_average
+```
+
+
+
+**simpleData anova analysis** 
+There is no error improvement.
+
+#### ANOVA analysis  
+
+After running the Anova tests on both the imputed data and the raw data we found that getting rid of non-relevant features with Anova did not have that much improvement on the model. This is probably due to the fact that our data is not norminally distributed and ANOVA may not be adequate to use in this situation. 
+
+Noticeably, in the second test removing just meterClass gave us a worse result than removing meterClass and meterScore combined in iteration A.The Anova tests identified meterClass as insignificant but not meterScore which is of note as the two are directly correleated to each other. From this we can conclude that ANOVA was not suitable for our model or was not an effective method of feature selection.
+
+## Summary
+
+* For our first tests we ran random forest models with different iterations on how to handle missing budget values that were zero. We found that the best way to handle it was to leave it as 0
+* We tested the model removing standout features like meterClass and meterScore and found this improved the model
+* We then tested the performance of the model using the given data versus extracting more features -- the best data set to train on was either the data given directly or the cleaned and expanded data with imputed values to fill in the missing values
+* Although we found feature selection made a difference -- ANOVA was not a suitable method for this dataset.
+
+Overall our best performing model was imputing missing values on an expanded data set, which gave us an rmse of ~1.5 which was extremely large meaning our model was ineffective and prone to over estimation. (The largest percent error for underestimation is 1 or 100%). This model would not be effective at predicting revenue but could be useful in predicting relative magnitudes of revenue amongst different movies
+
+.

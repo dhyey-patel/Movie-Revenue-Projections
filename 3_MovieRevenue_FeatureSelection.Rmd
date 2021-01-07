@@ -1,0 +1,522 @@
+---
+title: "Movie Boxoffice Predictions 3"
+output: html_notebook
+---
+
+This is the Third Notebook that we are presenting, In this notebook we are looking to do all of the suggestions given to us from the presentation and some of the next steps outlined in the presentation. 
+
+There are 3 big things that we want to do in this notebook. The first is we want to do is adjust the revenue and budget for the time value of money. After that we want to do feature selection using two different methods: recursive feature selection (brute force method using a library called boruta) and feature selection using ANOVA. We will be running this on two different data sets namely the NA one where we drop all NAs and the imputed data set. We are doing it on these data sets specifically because they were what we analyzed in the second notebook and saw interesting results there. There was a bit about ANOVA mentioned in the second notebook and all of that applies here as well. The reason that we are doing two feature selections is because we want to test the difference between them. We want to see what features they recommend in common and the differences. After which we will see which feature selection method performs better using error metrics. We would also ideally like to do multiple train/test splits as we know that the error rate heavily depends on the train/test split and give a huge range of 100% (MAPE) in some cases. We also recognize that this may not be possible computationally as it already take a significant amount of time to run the model once let alone running it multiple times. 
+
+We also did an ANOVA feature selection in notebook two but the reason we are doing it here is to compare feature selection models as Joe was interested in which one would perform better. Additionally the ANOVA feature selection in notebook two was on the dataset where the time value of money was not adjusted for, so we can see the impact that changing time value of money alone has on the results. 
+
+
+
+The first thing we must do as always is load all of the libraries that we will be using
+```{r}
+library(readr)
+library(stringr)
+library(tidyverse)
+library(dplyr)
+library(mice)
+library(VIM)
+library(plyr)
+library(tidyr)
+library(ggplot2)
+library(sf)
+library(sjmisc)
+library(highcharter)
+library(openair)
+library(zoo)
+library(countrycode)
+library(ggmap)
+library(blscrapeR) ##needed to get index for adjusting inflation
+library(Boruta)
+library(randomForest)
+library(mlbench)
+library(Metrics)
+```
+## Work with the NAs csv
+This is the csv where all the NAs are included and we will just drop all NA values
+
+Read in the data that we want to work with
+```{r}
+data_na = read.csv("allMerge_clean_withNA.csv")
+head(data_na)
+```
+
+Do some basic class conversions
+```{r}
+#converting classes 
+data_na <- mutate_if(data_na, is.factor, as.character())
+data_na$budget <- as.numeric(data_na$budget)
+data_na$Total.Revenue = as.numeric(data_na$Total.Revenue)
+head(data_na)
+```
+
+### Adjust Revenue and Budget for Time Value of Money
+
+Extract the Year from the release_date column and store it in a variable called year 
+```{r}
+data_na$Year = str_extract(data_na$release_date, "\\d{4}")
+head(data_na)
+```
+
+
+
+Create a table that will give us the adjustment amount based on a base year of 2020
+```{r}
+table = inflation_adjust(2020)
+table
+```
+
+
+Create a data frame with the values we need from the table
+```{r}
+table <- as.data.frame(table)
+table$adj_value2 <- ((100 + table$pct_increase)/100)
+df <- table[,c("year","adj_value2")]
+colnames(df) = c("Year", "adj_value") #changing name for left_join
+df
+```
+
+
+Merge the data frame from above with this data frame based on the year
+```{r}
+data_na = left_join(df, data_na, by = 'Year') 
+data_na
+```
+
+
+Convert adjusted_revenue and adjusted budget to an integer, we do this because there are a lot of decimals in some cases as the adjustments are very specific
+```{r}
+data_na$adjusted_revenue = as.integer(data_na$Total.Revenue/data_na$adj_value)
+data_na$adjusted_budget = as.integer(data_na$budget/data_na$adj_value)
+data_na
+```
+
+Drop all the columns that we will not be using
+```{r}
+data_na = subset(data_na, select = -c(homepage, id, imdb_id, overview, poster_path, revenue, status, video, original_title, orginal_title_2, year_2, Year, adj_value, budget, Total.Revenue, title, X,production_countries, production_companies, tagline, spoken_languages, genres, cast, crew, belongs_to_collection, prod_comp_name, adult, original_language))
+
+```
+
+
+Also drop all the NA values from the dataset, leaving us with ~5000 data points
+```{r}
+data_na <- drop_na(data_na)
+```
+
+Convert the variable types to factors
+```{r}
+data_na$release_date <- as.Date(data_na$release_date)
+data_na <- data_na %>% mutate_if(is.logical,as.factor)
+data_na <- data_na %>% mutate_if(is.character,as.factor)
+head(data_na) 
+```
+
+### Resursive Feature Selection with Boruta on NA Dataset
+
+
+It is very easy to run the boruta model, but can be time consuming in many cases, so we will maximize the runs at 100, by which almost all of the variables will be classified as important or unimportant. 
+```{r}
+featureSelection_na <- Boruta(adjusted_revenue ~ ., data = data_na, doTrace = 2, maxRuns = 100)
+```
+
+We can plot the feature selection that boruta returns to get more insight about the relevance of certain variables
+```{r}
+plot(featureSelection_na, las = 2, cex.axis = 0.5)
+```
+We get a lot of interesting initial results telling us the adjusted_budget is the most relevant variable in predicting adjusted_revenue by far when compared to almost all other variables. is_in_collection and vote_count are also very important variable in predicting revenue and not far behind adjusted revenue. This intuitively makes a lot of sense that both of these variables should effect revenue. You would definitely expect budget and revenue to be positively correlated. You would also expect vote count to go up for "good movies", and generally a sequel is made when the first movie does really well in terms of box office. 
+
+There are various variables (mainly the dummy variables created for production company and genres) that are deemed not important like mgm, music,rko_radio etc. Of all the unimportant variables only 1 is not a dummy variable and that is num_languages_spoken. 
+
+There are also 3 variables that are tentative, but we can see where they are based on the graph above, so we can choose what to do with them. 
+
+Interestingly the ranking of the variables is not the same when you run it multiple times. Based on the seed the ranking changes slightly, obviously adjusted_budget, is_in_collection and release_date were always the top 3 but between the genres it would differ sometimes. So we cannot definitively say that if a movie's genre is adventure or family it has a bigger impact on revenue. 
+
+So we will fix the tentative variables (it will assign the tentative variables under important or unimportant using the information it already has) and we will get the formula that we will plug into the random forest model
+```{r}
+featureSelectionFinal_na <- TentativeRoughFix(featureSelection_na)
+getNonRejectedFormula(featureSelectionFinal_na)
+```
+
+```{r}
+featureSelection_na
+```
+
+### Feature Selection using ANOVA with the NA data set
+
+Do a one way ANOVA of all the variables against adjusted_revenue
+```{r}
+one.way_na <- aov(adjusted_revenue ~ ., data = data_na)
+summary(one.way_na)
+```
+As we know from DMA the cutoff p value is 0.05 so anything above that is not important and anything below that is important. The stars beside the variable also tell us level of importance, but do not give us a clear outcome on which variables are the most important as it just says <2e-16 telling us that they are very important but not ranking them. 
+
+There are 6 variables that have a p value of <2e-16, and three of them are vote_count, adjusted_budget and is_in_collection  so the top 3 are the same for each feature selection. 
+
+The number of features selected is relatively the same but there are differences in the features selected for example unspecified cast is deemed not important by the ANOVA model but it is important according to the Boruta model. 
+
+After running the models we can see which one generally performed better
+
+
+### Random Forest Model using Boruta Features
+
+As mentioned at the beginning of the notebook we wanted to run the model multiple times because of the range in error based on the train test split. for the NA model we will be running it 30 times as it did not take toooo long to run.  The reason we are using 200 trees was explained in the second notebook and that is where we plotted the random forest to see what the ideal number of trees would be. 
+```{r}
+#We want to stroe the error metrics to analyze later 
+rmse_na_boruta <- c()
+mape_na_boruta <- c()
+
+for(i in 1:30){
+  
+  # Train test split
+  num_samples = dim(data_na)[1]
+  sampling.rate = 0.8
+  training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+  trainingSet <- subset(data_na[training, ])
+  testing <- setdiff(1:num_samples,training)
+  testingSet <- subset(data_na[testing, ])
+  
+  #Train the model
+  randomForestModel <- randomForest(adjusted_revenue ~ popularity + release_date + runtime + vote_average + 
+    vote_count + meterScore + meterClass + is_in_collection + 
+    has_tagline + number_of_cast + female_cast + male_cast + 
+    unspecified_cast + number_of_crew + female_crew + male_crew + 
+    unspecified_crew + comedy + horror + action + drama + fantasy + 
+    thriller + animation + adventure + romance + family + twentieth_century + 
+    warner_bros + universal + walt_disney + prod_size + num_production_companies + 
+    production_country + adjusted_budget, data=trainingSet, ntree=200)
+  
+  #Calculate the error
+  predictions <- predict(randomForestModel, testingSet)
+  error = predictions - testingSet$adjusted_revenue
+  mse = mean(error^2)
+  rmse_na_boruta[i] <- sqrt(mse)
+  errorpct <- ((abs(testingSet$adjusted_revenue - predictions))/testingSet$adjusted_revenue)
+  mape_na_boruta[i] <- mean(errorpct)
+  
+}
+
+```
+
+```{r}
+rmse_na_boruta
+mape_na_boruta
+```
+We initially see that RMSE is really large $100M range but we know that the error is significantly exaggerated as the errors are already big, plus there are 5K data points so it is not a good measure of error. 
+For this model we were able to run 30 train test splits and we can see that the range in MAPE is really big from 14% to 152% we can calculate the average on that to see 
+
+```{r}
+mean(rmse_na_boruta)
+mean(mape_na_boruta)
+```
+The average MAPE is 68% which is not the best but we already know that we are not able to predict the box office with our variables very accurately but we can compare feature selection models 
+
+
+To compare this model against the models done in the second R notebook we will take RMSE/ average adjusted_revenue
+```{r}
+mean(rmse_na_boruta)/mean(data_na$adjusted_revenue)
+```
+This number is significantly less than the numbers that we got in the second notebook, this shows that feature selection definitely improves accuracy. There is also the added benefit of less computational power required as we are analyzing less features. We can also see the effect RMSE has and how much it exaggerated the error by ~15% in this case.
+
+
+### Random Forest Model using ANOVA Features
+
+Similar to the model above we will be running it 30 times with 200 trees. 
+```{r}
+
+#Store the error metrics
+rmse_na_anova <- c()
+mape_na_anova <- c()
+
+for(i in 1:30){
+  
+  #Train test split
+  num_samples = dim(data_na)[1]
+  sampling.rate = 0.8
+  training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+  trainingSet <- subset(data_na[training, ])
+  testing <- setdiff(1:num_samples,training)
+  testingSet <- subset(data_na[testing, ])
+  
+  #Train the model
+  randomForestModel <- randomForest(adjusted_revenue ~ .- meterScore - num_spoken_languages - number_of_cast - unspecified_cast  - action - documentary - mystery - war - music - tv_movie - foreign - mgm - warner_bros - rko_radio - new_line_cinema - production_country, data=trainingSet, ntree=200)
+  
+  #Calcualte the error
+  predictions <- predict(randomForestModel, testingSet)
+  error = predictions - testingSet$adjusted_revenue
+  mse = mean(error^2)
+  rmse_na_anova[i] <- sqrt(mse)
+  errorpct <- ((abs(testingSet$adjusted_revenue - predictions))/testingSet$adjusted_revenue)
+  mape_na_anova[i] <- mean(errorpct)
+  
+}
+```
+
+
+```{r}
+rmse_na_anova
+mape_na_anova
+```
+We initially see that RMSE is really large $100M range but we know that the error is significantly exaggerated as the errors are already big, plus there are 5K data points so it is not a good measure of error. 
+looking at the MAPE's range is smaller than the range of MAPE for the boruta model, ranging from 16% to 111%
+
+```{r}
+mean(rmse_na_anova)
+mean(mape_na_anova)
+```
+As we could already see the features from ANOVA performed better. Now something that we realized after running the model is that we cannot actually compare right now, because the train test split is different so this result could be because of the train test split but not because of the train test split rather than the results. This is something we wanted to fix but this model needs to run overnight and now we do not have any more time as we have to submit
+
+To compare this model against the models done in the second R notebook we will take RMSE/ average adjusted_revenue
+```{r}
+mean(rmse_na_anova)/mean(data_na$adjusted_revenue)
+```
+This error metric is very comparable to the ANOVA model done in notebook two. The reason for that is because it is done on the same data set which means that we can see the impact that just adjusting revenue and budget for time has on the model. So in this case we are getting a rmse as percentage of revenue at 84% where as in book two we got a result of 189%, so the adjustment for time value of money definately had a very positive impact on the accuracy of the model.
+
+
+##Feature Selection on impuated data
+
+Read in the file
+```{r}
+data_rf = read.csv("rf_imputations_3.csv")
+head(data_rf)
+```
+
+
+Do the same basic type conversions
+```{r}
+#converting classes 
+data_rf <- mutate_if(data_rf, is.factor, as.character())
+data_rf$budget <- as.numeric(data_rf$budget)
+data_rf$Total.Revenue = as.numeric(data_rf$Total.Revenue)
+head(data_rf)
+```
+
+
+Extract year from the release date column 
+```{r}
+data_rf$Year = str_extract(data_rf$release_date, "\\d{4}")
+head(data_rf)
+```
+
+
+
+Find the adjustment value based on the base year of 2020 (scrape the US Beaurea website for information about this)
+```{r}
+table = inflation_adjust(2020)
+table
+```
+
+
+Extract the adj_value in a simple form and put it into a data frame so we can join it  
+```{r}
+table <- as.data.frame(table)
+table$adj_value2 <- ((100 + table$pct_increase)/100)
+df <- table[,c("year","adj_value2")]
+colnames(df) = c("Year", "adj_value") #changing name for left_join
+df
+```
+
+
+Join the main data with the adjustment and join by Year
+```{r}
+data_rf = left_join(df, data_rf, by = 'Year') 
+data_rf
+```
+
+Calculate the adjusted Budget and Revenue, and convert the value to an integer
+```{r}
+data_rf$adjusted_revenue = as.integer(data_rf$Total.Revenue/data_rf$adj_value)
+data_rf$adjusted_budget = as.integer(data_rf$budget/data_rf$adj_value)
+data_rf
+```
+This introduced some NAs so we will remove them 
+```{r}
+data_rf <- drop_na(data_rf)
+```
+
+
+Drop the columns that we will not be needing anymore
+```{r}
+data_rf <- subset(data_rf, select = -c(Year, adj_value, budget, Total.Revenue, title, X, original_language))
+```
+
+Change type of variables to factor and date accordingly 
+```{r}
+data_rf$release_date <- as.Date(data_rf$release_date)
+data_rf <- data_rf %>% mutate_if(is.logical,as.factor)
+data_rf <- data_rf %>% mutate_if(is.character,as.factor)
+head(data_rf)
+```
+
+
+### Resursive Feature Selection with Boruta on Imputed Dataset
+
+
+It is very easy to run the boruta model, but can be time consuming in many cases, so we will maximize the runs at 60, by which almost all of the variables will be classified as important or unimportant. 
+
+```{r}
+featureSelection_rf <- Boruta(adjusted_revenue ~ ., data = data_rf, doTrace = 2, maxRuns = 30)
+```
+After 30 runs which took around 1.5 hours it was able to classify all but 3 features which is good
+
+Plot the feature selection to get more information about it
+```{r}
+plot(featureSelection_rf, las = 2, cex.axis = 0.5)
+```
+
+Majority of the features are classified the same way for both the dataset, so the imputed data set does not significantly change the featrues used. 
+
+
+
+Do a tentative fix to the tentative features (assign them to either important or unimportant) and get the formula
+```{r}
+featureSelectionFinal_rf <- TentativeRoughFix(featureSelection_rf)
+getNonRejectedFormula(featureSelectionFinal_rf)
+```
+just take a look at the feature selection overall again
+```{r}
+featureSelection_rf
+```
+### Feature Selection with ANOVA on Imputed Dataset
+
+Do a one way ANOVA of all the variables against adjusted_revenue
+```{r}
+one.way_rf<- aov(adjusted_revenue ~ ., data = data_rf)
+summary(one.way_rf)
+```
+Once again majority of the features' classification is the same as the ANOVE on dataset where all the NA's were dropped, but thee is an interesting difference where meter Score was very significant in the NA dataset, but on the imputed one it is not important, this could possibly mean that the imputations for this variable are not very accurate or this can mean that meterClass had a big impact on the movies in the first dataset but not as much of an impact when the other 15K movies were included.
+
+
+
+### Random Forest Model using Boruta Features
+
+As mentioned at the beginning of the notebook we wanted to run the model multiple times because of the range in error based on the train test split. for the NA model we will be running it 3 times as it took a long to run.  The reason we are using 200 trees was explained in the second notebook and that is where we plotted the random forest to see what the ideal number of trees would be.
+
+```{r}
+
+rmse_rf_boruta <- c()
+mape_rf_boruta <- c()
+
+for(i in 1:3){
+  # Train test split
+  num_samples = dim(data_rf)[1]
+  sampling.rate = 0.8
+  training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+  trainingSet <- subset(data_rf[training, ])
+  testing <- setdiff(1:num_samples,training)
+  testingSet <- subset(data_rf[testing, ])
+  
+  #Train the model
+  randomForestModel <- randomForest(adjusted_revenue ~ popularity + release_date + 
+    runtime + vote_average + vote_count + meterScore + meterClass + 
+    is_in_collection + has_tagline + number_of_cast + female_cast + 
+    male_cast + unspecified_cast + number_of_crew + female_crew + 
+    male_crew + unspecified_crew + comedy + horror + action + 
+    drama + documentary + thriller + animation + adventure + 
+    romance + family + twentieth_century + warner_bros + columbia + 
+    walt_disney + prod_size + num_production_companies + production_country + 
+    adjusted_budget, data=trainingSet, ntree=200)
+  
+  #Calculate the error
+  predictions <- predict(randomForestModel, testingSet)
+  error = predictions - testingSet$adjusted_revenue
+  mse = mean(error^2)
+  rmse_rf_boruta[i] <- sqrt(mse)
+  errorpct <- ((abs(testingSet$adjusted_revenue - predictions))/testingSet$adjusted_revenue)
+  mape_rf_boruta[i] <- mean(errorpct)
+}
+
+```
+
+
+```{r}
+rmse_rf_boruta
+mape_rf_boruta
+```
+We initially see that RMSE is really large $50M range but we know that the error is significantly exaggerated as the errors are already big, plus there are 20K data points so it is not a good measure of error. 
+For this model we were only able to run it 3 times it takes a very long time for each run. So the error is hard to take at its current value. The interesting part is that the RMSE decreased significantly while the MAPE increased significantly. This is likely because all the NA's that we dropped in the first data set resulted in the movies that were left to have higher revenue. This makes sense as movies that are bigger (more boxoffice) are generally more well documented. This can be confirmed by taking the average of both revenue columns 
+
+
+```{r}
+mean(data_na$adjusted_revenue)
+mean(data_rf$adjusted_revenue)
+```
+The hypothesis is confirmed and the imputed data has 4 times the data points be the average revenue decreases significantly 
+
+```{r}
+mean(rmse_rf_boruta)
+mean(mape_rf_boruta)
+```
+We took the average to compare to the NA values, and the MAPE is ~2.5x worse which is not good. This could be because there are errors that happen when imputing data and then using imputed data to predict adds to the error. This likely leads us to the conclusion that imputing the data does not always result in better error results, at least not with "simple" models like random forest. 
+
+To compare this model against the models done in the second R notebook we will take RMSE/ average adjusted_revenue
+```{r}
+mean(rmse_rf_boruta)/mean(data_rf$adjusted_revenue)
+```
+This error metric is less than the results in the second notebook. While it is not significantly less it shows that at the very least feature selection has a positive impact on the error. 
+
+
+### Random Forest Model using ANOVA Features
+
+Similar to the model above we will be running it 3 times with 200 trees. 
+
+```{r}
+rmse_rf_anova <- c()
+mape_rf_anova <- c()
+
+for(i in 1:3){
+  #Train test split
+  num_samples = dim(data_rf)[1]
+  sampling.rate = 0.8
+  training <- sample(1:num_samples, sampling.rate * num_samples, replace=FALSE)
+  trainingSet <- subset(data_rf[training, ])
+  testing <- setdiff(1:num_samples,training)
+  testingSet <- subset(data_rf[testing, ])
+  
+  #Train the model
+  randomForestModel <- randomForest(adjusted_revenue ~ . - meterClass - meterScore - unspecified_cast - unspecified_crew - action - documentary - mystery - war - history - tv_movie - foreign - mgm, data=trainingSet, ntree=200)
+  
+  #Calcualte the error
+  predictions <- predict(randomForestModel, testingSet)
+  error = predictions - testingSet$adjusted_revenue
+  mse = mean(error^2)
+  rmse_rf_anova[i] <- sqrt(mse)
+  errorpct <- ((abs(testingSet$adjusted_revenue - predictions))/testingSet$adjusted_revenue)
+  mape_rf_anova[i] <- mean(errorpct)
+  
+}
+```
+
+
+```{r}
+rmse_rf_anova
+mape_rf_anova
+```
+The RMSE and MAPE is lower for the ANOVA selection then the boruta selection again this leads us to believe that maybe in this case ANOVA selection is actually better than the boruta selection. but once again we do not actually know this because we did not run it on the same train/test split.
+
+
+```{r}
+mean(rmse_rf_anova)
+mean(mape_rf_anova)
+```
+To compare this model against the models done in the second R notebook we will take RMSE/ average adjusted_revenue
+```{r}
+mean(rmse_rf_anova)/mean(data_rf$adjusted_revenue)
+```
+
+Once again this error metric is less than the results in the second notebook 
+
+
+### Next Steps
+
+As we do not have a lot of computational power we were not able to run a neural network model. It was already taking the entire night to run the random forest model so neural net models would have taken much longer. We believe that if we are able to find the correct structure to a neural net model then it would perform better on the imputed data compared to the data where we drop the na's. With 4 times the amount of training data we are able to better train the model and decrease MAPE. 
+
+Another thing that we were not able to do in this project is some sort of optimization where we determine the correct combination of variables to optimize revenue. 
+
+Another interesting problem that we are facing is that the MAPE is drastically different based on the train/test split and we wanted to learn what could be the reason for this and how can we fix it. 
+
+
+
+

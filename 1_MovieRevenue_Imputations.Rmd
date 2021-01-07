@@ -1,0 +1,1068 @@
+---
+title: "Movie Boxoffice Predictions 1"
+output: html_notebook
+---
+This is the first of the three notebooks that weare presenting, In this notebook we will be doing the inital cleaning of the data.
+
+The data that we have recieved is very rich but as it was initially created for a recommender systems model is is not ideally fit to project box office. But as our group had our minds set on doing this we extracted as much meaningful information as possible from the text data and even scraped the web to find more data where needed. The web scraping code was written in python as we were more familar with that language but the rest of the data manipulation is shown in this R notebook. At the end of this we would like to have a solid dataset on which we can simply run our models.
+
+Load the necessary libraries to run the code
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(readr)
+library(mice)
+library(VIM)
+
+```
+
+
+### Read in the data
+
+Load in the first set of data
+```{r}
+meta_data <- read.csv("movies_metadata.csv", header = TRUE,na.strings=c(""))
+head(meta_data)
+```
+
+
+
+Get summary statistics on the data
+```{r}
+summary(meta_data)
+```
+Because there were a lot of NAs/0 for Total Revenue and that is what we were trying to predict so we decided to scrape the web using a python script. We will merge in the two data sets that we collected 
+
+```{r}
+movie_revenue <- read.csv("movie_revenue.csv", header = TRUE,na.strings=c(""))
+ratings <- read.csv("output.csv", header = TRUE,na.strings=c(""))
+credits <- read.csv("credits.csv", header = TRUE, na.strings = c(""))
+
+meta_data$id <- as.character(meta_data$id)
+data <- left_join(meta_data, ratings, by = 'id')
+data <- left_join(data, movie_revenue, by = c("imdb_id" = "IMDB.ID"))
+credits$id <- as.character(credits$id) 
+data <- left_join(data, credits, by = 'id')
+
+
+
+head(data)
+```
+
+```{r}
+summary(data)
+```
+Subsitutude values that mean no value to NA (empty strings already converted to NA)
+```{r}
+#Sometimes the csv files read in the data types differently so just to make sure everyone has the same data types I will convert everything to character if its a factor
+
+data <- mutate_if(data, is.factor, as.character())
+
+#an empty list indicates that there is no information about that column, so NA
+data$genres[data$genres == "[]"] <- NA
+data$production_countries[data$production_countries == "[]"] <- NA
+data$production_companies[data$production_companies == "[]"] <- NA
+data$spoken_languages [data$spoken_languages == "[]"] <- NA
+data$cast[data$cast == "[]"] <- NA
+data$crew [data$crew == "[]"] <- NA
+
+#0 dollar budget likely indicates NA as 35k of them have 0 budget
+data$budget[data$budget == "0"] <- NA
+
+#0 total.revenue indicates NA
+data$Total.Revenue[data$Total.Revenue == "0"] <- NA
+
+#if vote_count[i] = 0, set vote_count[i] = NA and set vote_average[i] = NA
+data$vote_count[data$vote_count == "0"] <- NA
+data$vote_average[is.na(data$vote_count)] <- NA
+
+#for meterScore and meterClass if the values are <0 then they are NA
+data$meterScore[data$meterScore < 0] <- NA
+data$meterClass[data$meterClass < 0] <- NA
+summary(data)
+
+```
+
+### First set of Data Cleaning
+
+There is a lot that needs to happen to the data before we are able to any analysis
+
+The first thing that we need to do is remove the variables that have no impact and/or is something that we cannot analyze. These variables include:
+
+1. homepage: URL to homepage, has no value
+
+2. id: rotten tomatoes id, has no value as each id is unique
+
+3. imdb_id: imdb id, has no value as each id is unique 
+
+4. overview: long description of the movie, hard to analyze
+
+5. poster_path: URL to poster, has no value
+
+6. revenue: this revenue has a lot of incomplete values, so new revenue data was scrapped from the web
+
+7. status: vast majority are released
+
+8. video: only 23 out of 46K of them are true, and we dont know what this variable is, so no need to analyze it
+
+9. original_title: there is a title variable, similar variables same in majority of the cases
+
+10. orginal_title_2: Same as original_title variable
+
+11. year_2: There is a release date variable which is easier to work with and gives the same value
+
+
+
+```{r}
+data = subset(data, select = -c(homepage, id, imdb_id, overview, poster_path, revenue, status, video, original_title, orginal_title_2, year_2))
+```
+
+```{r}
+head(data)
+```
+### Data Cleaning and Manipulation
+
+Changes to be made to the data based on the columns:
+
+1. adult: change type to factor
+
+2. belongs_to_collection: needs to made a dummy variable (TRUE or FALSE), we cannot analyze based on collection it belongs to as majority do not belong to a collection, and you cannot add any value there otherwise the model will think everything not part of a collection belongs to the same collection, after converting to dummy variable change type to factor 
+
+3. budget: change type to numeric 
+
+4. genres: create 20 dummy variables subset of genres the movie is, extract the genres from the list, after that convert each variable to a factor
+
+5. original_language: change type to factor  
+
+6. popularity: change type to numeric
+
+7. production_companies: Find the top 10 companies and create 10 dummy variables, we do this as there are generally multiple production companies that work on the same movie. so we can have multiple variables with a value of true. Convert each type dummy vairable to a factor 
+
+8. production_countries: extract the first country (main country the movie was produced), and change type to factor, create a new variable called num_production_countries that counts the number of production countries, as the factor variable country cannot have more than 53 different categories, if it is one of the smaller countries (not top 31), it will go in the other category, the reason we choose top 31 is because that is the cutoff where that country has at least 100 movies made in that country
+
+9. release_date: change type to date
+
+10. runtime: change type to numeric
+
+11. spoken_languages: count the number of spoken languages in the movie, change type to numeric
+
+13. title: nothing to change, we should probably drop this variable as it is a text, and we do not do any text mining to it
+
+14. vote_average: No change
+
+15. vote_count: No change 
+
+16. meterScore: No change 
+
+17. meterClass: change to type factor
+
+18. Total.Revenue: remove $, change type to numeric
+
+19. cast: introduce new variables for the number of cast members, female cast members, male cast members, and unspecified cast members
+
+20. crew: similar to cast, introduce new variables for the number of crew members, female crew members, male crew members, and unspecified crew members
+
+#### Type Changes
+```{r}
+# deal with variables that only require a type change first, simplest change to make
+data$adult <- as.factor(data$adult)
+data$original_language <- as.factor(data$original_language)
+data$budget <- as.numeric(data$budget)
+data$popularity <- as.numeric(data$popularity)
+data$release_date <- as.Date(data$release_date)
+data$runtime <- as.numeric(data$runtime)
+data$meterClass <- as.factor(data$meterClass)
+```
+#### Simple Extraction from the data
+
+The reason that we have to extract from the data is because these columns are text data so we need to extract meaning our of it. 
+
+1. For the collection data it would tell us what collection the data bellonged to and that is difficult to analyze so rather we added a column called is_in_collection which is a TRUE or FALSE column (categorical) which is something the random forest model can analyze easily. We could have potentially just created categories for each collections but that was more than 53 levels to a factor variable so we could not do that 
+
+2. For the spoken_languages it gave us a list of languages so we just extracted the number
+
+3. Similar to collection we did a true and false for tagline as many movies did not have a tagline
+
+4. For the Total.Revenue we just had to remove the $ and extract the number
+
+5. For cast and crew we were given a list of each member along with their gender so we extracted the number of each (total cast/crew, male cast/crew, female cast/crew and unspecified cast/crew)
+```{r}
+# "Simple" Changes
+
+#belongs_to_collection CHANGES
+# Change all NAs to FALSE in the belongs_to_collection
+data$is_in_collection[is.na(data$belongs_to_collection)] <- FALSE
+#If it does not belong to a collection then it is does, so if it is not false then set the value to true
+data$is_in_collection[!(is.na(data$belongs_to_collection))] <- TRUE
+data$is_in_collection <- as.factor(data$is_in_collection)
+
+
+#spoken_languages CHANGES
+data$num_spoken_languages <- str_count(data$spoken_languages, 'name')
+
+#tagline CHANGES
+data$has_tagline[is.na(data$tagline)] <- FALSE
+data$has_tagline[data$tagline != FALSE] <- TRUE
+data$has_tagline <- as.factor(data$has_tagline)
+
+
+#Total.Revenue CHANGES
+data$Total.Revenue <- as.numeric(gsub("[\\$,]", "", data$Total.Revenue))
+
+# cast CHANGES
+data$number_of_cast <- str_count(data$cast, 'name')
+data$female_cast <- str_count(data$cast, ('gender\'\\:\\s1'))
+data$male_cast <- str_count(data$cast, ('gender\'\\:\\s2'))
+data$unspecified_cast <- str_count(data$cast, ('gender\'\\:\\s0'))
+
+# crew CHANGES
+data$number_of_crew <- str_count(data$crew, 'name')
+data$female_crew <- str_count(data$crew, ('gender\'\\:\\s1'))
+data$male_crew <- str_count(data$crew, ('gender\'\\:\\s2'))
+data$unspecified_crew <- str_count(data$crew, ('gender\'\\:\\s0'))
+
+```
+
+
+#### Genre Variables Being Created
+For the genres we were given a list of genres and there were genreally 3-4 genres. So we had two options we could either extract 1 genres (likely the first one) and call that the main genre with just one variable or we could create 20 variables (one for each genre) and say TRUE and FALSE for each one. We decided it could be beneficial to look at each genre and so we created 20 variables
+
+
+```{r}
+#genres CHANGES
+#to create the dummy variables we will go through each row and update the dummy variables accordingly 
+
+#create a list of all of the different genres
+all_genres <- c("Comedy", "Horror", "Action", "Drama", "Documentary", "Science Fiction",
+              "Crime", "Fantasy", "Thriller", "Animation", "Adventure", "Mystery", "War", "Romance", "Music",
+              "Family","Western","History","TV Movie","Foreign")
+
+#create the dummy variable rows and set it all to FALSE
+data$comedy <- FALSE
+data$horror <- FALSE
+data$action <- FALSE
+data$drama <- FALSE
+data$documentary <- FALSE
+data$science_fiction <- FALSE
+data$crime <- FALSE
+data$fantasy <- FALSE
+data$thriller <- FALSE
+data$animation <- FALSE
+data$adventure <- FALSE
+data$mystery <- FALSE
+data$war <- FALSE
+data$romance <- FALSE
+data$music <- FALSE
+data$family <- FALSE
+data$western <- FALSE
+data$history <- FALSE
+data$tv_movie <- FALSE
+data$foreign <- FALSE
+
+#use a for loop to iterate through the entire genres column
+num_rows <- nrow(data)
+for (i in 1:num_rows){
+  #use a for loop to iterate through the all_genres vector
+  for (j in 1:length(all_genres)){
+    #check if the genre from the all_genres vector exists in genres column[i]
+    check <- grepl(all_genres[j], data$genres[i], fixed = TRUE)
+    #we do not want to change NA values to FALSE so we must make sure NA stays NA
+    if(is.na(data$genres[i])){
+      check <- NA
+    }
+    #based on the value of j, update the correct dummy variable
+    if (j == 1){
+      data$comedy[i] <- check 
+    }else if(j == 2){
+      data$horror[i] <- check
+    }else if(j == 3){
+      data$action[i] <- check
+    } else if(j == 4){
+      data$drama[i] <- check
+    }else if(j == 5){
+      data$documentary[i] <- check
+    }else if(j == 6){
+      data$science_fiction[i] <- check
+    }else if(j == 7){
+      data$crime[i] <- check
+    }else if(j == 8){
+      data$fantasy[i] <- check
+    }else if(j == 9){
+      data$thriller[i] <- check
+    }else if(j == 10){
+      data$animation[i] <- check
+    }else if(j == 11){
+      data$adventure[i] <- check
+    }else if(j == 12){
+      data$mystery[i] <- check
+    }else if(j == 13){
+      data$war[i] <- check
+    }else if(j == 14){
+      data$romance[i] <- check
+    }else if(j == 15){
+      data$music[i] <- check
+    }else if(j == 16){
+      data$family[i] <- check
+    }else if(j == 17){
+      data$western[i] <- check
+    }else if(j == 18){
+      data$history[i] <- check
+    }else if(j == 19){
+      data$tv_movie[i] <- check
+    }else if(j == 20){
+      data$foreign[i] <- check
+    }
+  }
+}
+
+```
+
+#### Production Company variables being created
+
+Similar to Genres we had the option create variable for each country or extract the first company, or create dummy variables we initally tried to just extract 1 company and call that the main but there were more than 53 different companies so we could not create a categorical variable that the random forest model can analyze. Also similar to generes there were multiple companies that worked on the same movie so we decided to create variables for the top 10 companies as a collaboration between them could result in a higher revenue.  
+```{r}
+#production_companies CHANGES
+
+#get the first company id
+data$prod_comp_id <- str_extract(data$production_companies, pattern = "([0-9]+)")
+
+#determine the top 10 companies 
+data$prod_comp_name <- gsub('(^\\[\\{\'name\'\\:\\s\'|\'\\,\\s\'id.*)', '', data$production_companies)
+data$prod_comp_name[data$prod_comp_name == "[]"] <- NA
+data[] %>%
+   group_by(prod_comp_name) %>%
+   summarise(movie_count = n()) %>%
+   arrange(desc(movie_count)) %>%
+   filter(!is.na(prod_comp_name)) %>%
+   head(20) 
+```
+
+```{r}
+#create dummy variables for the top 10 companies 
+#create a list of all of the different genres
+companiestop10 <- c("Paramount Pictures", "Metro-Goldwyn-Mayer", "Twentieth Century Fox Film Corporation", 
+                    "Warner Bros.","Universal Pictures", "Columbia Pictures","United Artists","RKO Radio", 
+                    "Walt Disney", "New Line Cinema")
+
+#create the dummy variable rows and set it all to FALSE
+data$paramount <- FALSE
+data$mgm <- FALSE
+data$twentieth_century <- FALSE
+data$warner_bros <- FALSE
+data$universal <- FALSE
+data$columbia <- FALSE
+data$rko_radio <- FALSE
+data$united_artists <- FALSE
+data$walt_disney <- FALSE
+data$new_line_cinema<- FALSE
+
+
+
+
+
+#use a for loop to iterate through the entire genres column
+num_rows <- nrow(data)
+for (i in 1:num_rows){
+  #use a for loop to iterate through the companiestop10 vector
+  for (j in 1:length(companiestop10)){
+    #check if the company from the companiestop10 vector exists in genres column[i]
+    check <- grepl(companiestop10[j], data$production_companies[i], fixed = TRUE)
+    if(is.na(data$production_companies[i])){
+      check <- NA
+    }
+    #based on the value of j, update the correct dummy variable
+    if (j == 1){
+      data$paramount[i] <- check 
+    }else if(j == 2){
+      data$mgm[i] <- check
+    }else if(j == 3){
+      data$twentieth_century[i] <- check
+    } else if(j == 4){
+      data$warner_bros[i] <- check
+    }else if(j == 5){
+      data$universal[i] <- check
+    }else if(j == 6){
+      data$columbia[i] <- check
+    }else if(j == 7){
+      data$rko_radio[i] <- check
+    }else if(j == 8){
+      data$united_artists[i] <- check
+    }else if(j == 9){
+      data$walt_disney[i] <- check
+    }else if(j == 10){
+      data$new_line_cinema[i] <- check
+    }
+  }
+}
+
+#How many movies the production company has done 
+prod_comp_movie_count <- data %>% group_by(prod_comp_id) %>% 
+  summarise(movie_count = n())
+
+matches <-match(data$prod_comp_id, prod_comp_movie_count$prod_comp_id)
+data <- cbind(data, prod_size=(prod_comp_movie_count[matches,])$movie_count)
+data$prod_size[data$prod_size == 12183] <- NA
+data <- subset(data, select = -c(prod_comp_id))
+
+#finally create a variable for the number of production companies
+data$num_production_companies <- str_count(data$production_companies, 'name')
+
+
+```
+
+####Production Country Variable Creation
+
+Similar to production company, prodction country was a list of the countries that the movie was produced in. For this we did not want to create more dummy variables so we decided that we would cut off the countries at a 100 movies margin, so if the country has not made 100 movies then it's level will be dropped and merged into a level called small country 
+```{r}
+#production_countries CHANGES
+data$production_country <- str_extract(string = data$production_countries, pattern = "[:upper:]+")
+data$production_country <- as.factor(data$production_country)
+
+#Find the number of different levels 
+nlevels(data$production_country)
+
+#There are 143 levels and we only want to keep 50, so we need to remove 93 of the bottom levels
+data[] %>%
+   group_by(production_country) %>%
+   summarise(movie_count = n()) %>%
+   arrange(desc(movie_count)) %>%
+   filter(!is.na(production_country)) %>%
+   head(50)
+
+#create a top31 vector with the top 31 countries (>100 movies filled there)
+top31 <- c("US","GB","FR","JP","CA","IT","DE","RU","IN","ES","AU","HK","KR","SE","FI","BE","DK","CN","PL","BR","MX",
+           "NL","AR","CZ","AT","NO","IE","TR","GR","HU","IR")
+
+#if the country is not in the top 31 countries then it is from a "small country"
+data$production_country <- as.character(data$production_country)
+data$production_country[(!(data$production_country %in% top31)) & (!(is.na(data$production_country)))] <- "Small Country"
+
+
+
+
+
+
+data$production_country<- as.factor(data$production_country)
+
+
+
+
+```
+
+
+
+```{r}
+#change all logical variables to factors
+data <- data %>% mutate_if(is.logical,as.factor)
+```
+
+
+As we have changed a lot of data (created new variables from the existing ones), we need to drop some variables from the data set
+
+```{r}
+data <- subset(data, select = -c(production_countries, production_companies, tagline, spoken_languages, genres, cast, crew, belongs_to_collection, prod_comp_name))
+```
+
+
+
+Now all the cleaning based on the columns is made, and we must make changes based on rows
+So we will take a look at the summary data and make changes to specific rows based on columns
+
+```{r}
+summary(data)
+```
+
+ 
+clean random data in adult, remove any value that is not TRUE or FALSE
+
+```{r}
+data$adult[data$adult != "True" & data$adult != "False"] <- NA
+data$adult<- droplevels(data$adult)
+```
+
+
+NA values for Total.Revenue and release_date must be dropped as we do not want to impute Total.Revenue(It is the dependent variable what we are trying to predict) and we do not want to fill in the release_date row as it would be difficult to accurately predict and it is not a lot of data points that we are dropping
+
+```{r}
+data <- data %>% drop_na(Total.Revenue)
+data <- data %>% drop_na(release_date)
+summary(data)
+```
+
+Adult values are all False so we can just drop them
+```{r}
+data <- subset(data, select = -c(adult))
+```
+
+
+The number of NAs has changed for each variable and we will further analyze the NAs
+
+```{r}
+#calculate the percentage of missing data per variable
+p_missing <- function(x) {sum(is.na(x))/length(x)*100}
+apply(data, 2, p_missing)
+```
+
+```{r}
+nrow(data)
+```
+
+You can see that the most common missing data is budget at 64% of the data missing, and meterScore and meterClass with 52% of the data missing. This makes it much harder to impute as so much data is missing, but as the data set is "big" (19868 data points) we should still be able to impute the data.
+
+Further analysis on missing data
+
+```{r}
+#This graphic will show us the combination of missing data
+missing_data <- md.pattern(data)
+
+```
+Clearly the graphic is too big and we cannot tell what the combination is so we can print the missing_data 
+
+```{r}
+missing_data <- as.data.frame(missing_data)
+missing_data
+```
+
+This tells us there are 4684 rows with complete data (good amount to start (approx. 25%))
+And we can see here that the variables with the with the most missing data:
+3524 rows have only budget missing (making it a bit easier to predict budget for those )
+1893 rows have meterScore and meterClass missing, we are only predicting meterScore so makes it a bit easier
+5590 rows have both meterScore, meterClass, and budget missing, these rows will be difficult to predict as they have more limited data to work with.
+There are also some rows in the extereme cases (10-15 total) where they have 35+ variables missing and all that data needs to be imputed, but as the number of rows like that is only 15ish they will not make a big difference in a dataset with 19k variables
+
+After understanding the data we have to move onto the imputating the data
+
+
+### Imputations using "cart" model (decision tree)
+
+Quick introduction to imputations. Imputations is basically filling in missing values with values that would make sense in that position. There are two imputation models that we are running, namely cart nad rf. The cart model uses a decision tree to fill in each missing value, and rf uses a random forest to fill in the missing values.  
+
+We will be imputing all of the columns that have missing data 
+
+```{r}
+#WARNING: this section of the code take around 30 mins to run 
+imputations_cart <- mice(data, method = "cart", m = 3, seed = 123, maxit = 3)
+
+```
+
+write all to csv just to safe it just incase as it takes time 
+```{r}
+data_cart1 <- complete(imputations_cart, 1)
+data_cart2 <- complete(imputations_cart, 2)
+data_cart3 <- complete(imputations_cart, 3)
+
+
+write.csv(data_cart1, "cart_imputations_1.csv")
+write.csv(data_cart2, "cart_imputations_2.csv")
+write.csv(data_cart3, "cart_imputations_3.csv")
+```
+
+
+#### Density and Scratter Plots for cart imputations
+We want to look at the 3 imputations generated by the the cart model
+There are ~45 variables and 2 charts per variable, so there are a lot of graphs, after all of the graphs are printed I will talk about the general density graphs and scratter plots 
+```{r}
+densityplot(imputations_cart, ~ budget | .imp)
+stripplot(imputations_cart, budget, col = c("grey", mdc(2)), pch = c(1, 20))
+
+```
+
+```{r}
+densityplot(imputations_cart, ~ vote_average | .imp)
+stripplot(imputations_cart, vote_average, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ vote_count | .imp)
+stripplot(imputations_cart, vote_count, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ meterScore | .imp)
+stripplot(imputations_cart, meterScore, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ meterClass | .imp)
+stripplot(imputations_cart, meterClass, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ num_spoken_languages | .imp)
+stripplot(imputations_cart, num_spoken_languages, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ number_of_cast | .imp)
+stripplot(imputations_cart, number_of_cast, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ female_cast | .imp)
+stripplot(imputations_cart, female_cast, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ male_cast | .imp)
+stripplot(imputations_cart, male_cast, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ unspecified_cast | .imp)
+stripplot(imputations_cart, unspecified_cast, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ number_of_crew | .imp)
+stripplot(imputations_cart, number_of_crew, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ female_crew | .imp)
+stripplot(imputations_cart, female_crew, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ male_crew | .imp)
+stripplot(imputations_cart, male_crew, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ unspecified_crew | .imp)
+stripplot(imputations_cart, unspecified_crew, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ comedy | .imp)
+stripplot(imputations_cart, comedy, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ horror | .imp)
+stripplot(imputations_cart, horror, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ action | .imp)
+stripplot(imputations_cart, action, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ drama | .imp)
+stripplot(imputations_cart, drama, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ documentary | .imp)
+stripplot(imputations_cart, documentary, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ science_fiction | .imp)
+stripplot(imputations_cart, science_fiction, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ crime | .imp)
+stripplot(imputations_cart, crime, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ fantasy | .imp)
+stripplot(imputations_cart, fantasy, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ thriller | .imp)
+stripplot(imputations_cart, thriller, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ animation | .imp)
+stripplot(imputations_cart, animation, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ adventure | .imp)
+stripplot(imputations_cart, adventure, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ mystery | .imp)
+stripplot(imputations_cart, mystery, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ war | .imp)
+stripplot(imputations_cart, war, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ romance | .imp)
+stripplot(imputations_cart, romance, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ music | .imp)
+stripplot(imputations_cart, music, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ family | .imp)
+stripplot(imputations_cart, family, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ western | .imp)
+stripplot(imputations_cart, western, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ history | .imp)
+stripplot(imputations_cart, history, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ tv_movie | .imp)
+stripplot(imputations_cart, tv_movie, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ foreign | .imp)
+stripplot(imputations_cart, foreign, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ paramount | .imp)
+stripplot(imputations_cart, paramount, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ mgm | .imp)
+stripplot(imputations_cart, mgm, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ twentieth_century | .imp)
+stripplot(imputations_cart, twentieth_century, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ warner_bros | .imp)
+stripplot(imputations_cart, warner_bros, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ universal | .imp)
+stripplot(imputations_cart, universal, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ columbia | .imp)
+stripplot(imputations_cart, columbia, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ rko_radio | .imp)
+stripplot(imputations_cart, rko_radio, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ united_artists | .imp)
+stripplot(imputations_cart, united_artists, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ walt_disney | .imp)
+stripplot(imputations_cart, walt_disney, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ new_line_cinema | .imp)
+stripplot(imputations_cart, new_line_cinema, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ prod_size | .imp)
+stripplot(imputations_cart, prod_size, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ num_production_companies | .imp)
+stripplot(imputations_cart, num_production_companies, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_cart, ~ production_country | .imp)
+stripplot(imputations_cart, production_country, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+In general all of the imputed data is close to the median, the mean is generally skewed because of some outliers so it makes sense that the imputations are close to the median. The key variables to look at in terms of imputations are mainly budget, meterClass, meterScore. We know that meterClass and meterScore are highly correlated so as a result we want both of their density graphs to look similar (less imputations in 75+ meterScore, should result in less imputations in the certified fresh column for meterClass). For budget we would prefer the imputations to be lower when compared to the data set as the movies with recorded data will generally have a higher budget and their movie will be made by bigger production companies who disclose the budget. 
+
+
+
+
+
+### Imputations with "rf" method (Random Forrest)
+
+Run imputations using random forest to try and get the best data possible
+```{r}
+imputations_rf <- mice(droplevels(data), method = "rf", m = 3, seed = 123, maxit = 3)
+```
+
+```{r}
+data_rf1 <- complete(imputations_rf, 1)
+data_rf2 <- complete(imputations_rf, 2)
+data_rf3 <- complete(imputations_rf, 3)
+
+
+write.csv(data_rf1, "rf_imputations_1.csv")
+write.csv(data_rf2, "rf_imputations_2.csv")
+write.csv(data_rf3, "rf_imputations_3.csv")
+```
+
+
+```{r}
+save(imputations_rf, file = "imputaions_rf.rda")
+save(imputations_cart, file = "imputations_cart.rda")
+```
+
+
+Similar to the cart model we will plot all of the density graphs and scatter plots
+```{r}
+densityplot(imputations_rf, ~ budget | .imp)
+stripplot(imputations_rf, budget, col = c("grey", mdc(2)), pch = c(1, 20))
+
+```
+
+```{r}
+densityplot(imputations_rf, ~ vote_average | .imp)
+stripplot(imputations_rf, vote_average, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ vote_count | .imp)
+stripplot(imputations_rf, vote_count, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ meterScore | .imp)
+stripplot(imputations_rf, meterScore, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ meterClass | .imp)
+stripplot(imputations_rf, meterClass, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ num_spoken_languages | .imp)
+stripplot(imputations_rf, num_spoken_languages, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ number_of_cast | .imp)
+stripplot(imputations_rf, number_of_cast, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ female_cast | .imp)
+stripplot(imputations_rf, female_cast, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ male_cast | .imp)
+stripplot(imputations_rf, male_cast, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ unspecified_cast | .imp)
+stripplot(imputations_rf, unspecified_cast, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ number_of_crew | .imp)
+stripplot(imputations_rf, number_of_crew, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ female_crew | .imp)
+stripplot(imputations_rf, female_crew, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ male_crew | .imp)
+stripplot(imputations_rf, male_crew, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ unspecified_crew | .imp)
+stripplot(imputations_rf, unspecified_crew, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ comedy | .imp)
+stripplot(imputations_rf, comedy, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ horror | .imp)
+stripplot(imputations_rf, horror, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ action | .imp)
+stripplot(imputations_rf, action, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ drama | .imp)
+stripplot(imputations_rf, drama, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ documentary | .imp)
+stripplot(imputations_rf, documentary, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ science_fiction | .imp)
+stripplot(imputations_rf, science_fiction, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ crime | .imp)
+stripplot(imputations_rf, crime, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ fantasy | .imp)
+stripplot(imputations_rf, fantasy, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ thriller | .imp)
+stripplot(imputations_rf, thriller, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ animation | .imp)
+stripplot(imputations_rf, animation, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ adventure | .imp)
+stripplot(imputations_rf, adventure, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ mystery | .imp)
+stripplot(imputations_rf, mystery, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ war | .imp)
+stripplot(imputations_rf, war, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ romance | .imp)
+stripplot(imputations_rf, romance, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ music | .imp)
+stripplot(imputations_rf, music, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ family | .imp)
+stripplot(imputations_rf, family, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ western | .imp)
+stripplot(imputations_rf, western, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ history | .imp)
+stripplot(imputations_rf, history, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ tv_movie | .imp)
+stripplot(imputations_rf, tv_movie, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ foreign | .imp)
+stripplot(imputations_rf, foreign, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ paramount | .imp)
+stripplot(imputations_rf, paramount, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ mgm | .imp)
+stripplot(imputations_rf, mgm, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ twentieth_century | .imp)
+stripplot(imputations_rf, twentieth_century, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ warner_bros | .imp)
+stripplot(imputations_rf, warner_bros, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ universal | .imp)
+stripplot(imputations_rf, universal, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ columbia | .imp)
+stripplot(imputations_rf, columbia, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ rko_radio | .imp)
+stripplot(imputations_rf, rko_radio, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ united_artists | .imp)
+stripplot(imputations_rf, united_artists, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ walt_disney | .imp)
+stripplot(imputations_rf, walt_disney, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ new_line_cinema | .imp)
+stripplot(imputations_rf, new_line_cinema, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ prod_size | .imp)
+stripplot(imputations_rf, prod_size, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ num_production_companies | .imp)
+stripplot(imputations_rf, num_production_companies, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+
+```{r}
+densityplot(imputations_rf, ~ production_country | .imp)
+stripplot(imputations_rf, production_country, col = c("grey", mdc(2)), pch = c(1, 20))
+```
+All of the imputations from rf and cart are relatively similar and there are not a lot of big differences, making it more difficult to choose what the best imputation to use would be. Based on the requirements we are looking for mainly under budget, meterClass, meterScore we think that the third imputation under the rf model would be the best imputation to use on the rest of the analysis. 
+
